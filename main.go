@@ -1,14 +1,14 @@
 package main
 
 import (
+	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/goccy/go-graphviz"
-	"github.com/goccy/go-graphviz/cgraph"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +21,27 @@ type Graph map[string]Contributors
 // Repository is a git repository
 type Repository struct {
 	Path  string
+	Since string
 	Graph Graph
+}
+
+// GraphML is a graphml file
+type GraphML struct {
+	XMLName xml.Name `xml:"graphml"`
+	Nodes   []Node   `xml:"graph>node"`
+	Edges   []Edge   `xml:"graph>edge"`
+}
+
+// Node is a node in the graphml file
+type Node struct {
+	ID   string `xml:"id,attr"`
+	Type string `xml:"type,attr"`
+}
+
+// Edge is an edge in the graphml file
+type Edge struct {
+	Source string `xml:"source,attr"`
+	Target string `xml:"target,attr"`
 }
 
 func (r *Repository) Scan(path string, info os.FileInfo, err error) error {
@@ -35,15 +55,13 @@ func (r *Repository) Scan(path string, info os.FileInfo, err error) error {
 		return nil
 	}
 
-	h, err := g.Head()
+	since, err := time.Parse("02/01/2006", r.Since)
 	if err != nil {
+		fmt.Println(err)
 		return nil
 	}
 
-	// now := time.Now()
-	// since := now.AddDate(0, -1, 0)
-	// l, err := g.Log(&git.LogOptions{All: true, Since: &since})
-	l, err := g.Log(&git.LogOptions{From: h.Hash()})
+	l, err := g.Log(&git.LogOptions{All: true, Since: &since})
 	if err != nil {
 		return nil
 	}
@@ -58,8 +76,8 @@ func (r *Repository) Scan(path string, info os.FileInfo, err error) error {
 
 func main() {
 	var (
-		repoPath  string
-		graphType string
+		repoPath string
+		since    string
 	)
 
 	cmd := cobra.Command{
@@ -71,52 +89,48 @@ func main() {
 				cmd.Help()
 				os.Exit(1)
 			}
+
 			r := Repository{
 				Path:  repoPath,
+				Since: since,
 				Graph: make(Graph),
 			}
 
 			filepath.Walk(repoPath, r.Scan)
 
-			g := graphviz.New()
-			graph, err := g.Graph()
+			graph := GraphML{}
+			for repo, contributors := range r.Graph {
+				if len(repo) == 0 {
+					continue
+				}
+				graph.Nodes = append(graph.Nodes, Node{ID: repo, Type: "project"})
+				for contributor := range contributors {
+					if len(contributor) == 0 {
+						continue
+					}
+					graph.Nodes = append(graph.Nodes, Node{ID: contributor, Type: "contributor"})
+					graph.Edges = append(graph.Edges, Edge{Source: contributor, Target: repo})
+				}
+			}
+
+			file, err := os.Create("graph.graphml")
 			if err != nil {
 				fmt.Println(err)
 				os.Exit(1)
 			}
-			// keep track of contributors to avoid duplicates
-			var contributorNodes map[string]*cgraph.Node
+			defer file.Close()
 
-			for name, repo := range r.Graph {
-				rV, err := graph.CreateNode(name)
-				if err != nil {
-					fmt.Println(err)
-					os.Exit(1)
-				}
-				for contributor := range repo {
-					cV, exists := contributorNodes[contributor]
-					if !exists {
-						cV, err = graph.CreateNode(contributor)
-						if err != nil {
-							fmt.Println(err)
-							os.Exit(1)
-						}
-					}
-					graph.CreateEdge("", cV, rV)
-				}
-			}
-
-			graph.SetLayout(graphType)
-
-			if err := g.RenderFilename(graph, graphviz.XDOT, "graph.gv"); err != nil {
-				fmt.Println(err)
+			enc := xml.NewEncoder(file)
+			enc.Indent("", "  ")
+			if err := enc.Encode(graph); err != nil {
+				fmt.Printf("error: %v\n", err)
 				os.Exit(1)
 			}
 		},
 	}
 
 	cmd.Flags().StringVarP(&repoPath, "repo", "r", "", "Path to the git repository")
-	cmd.Flags().StringVarP(&graphType, "type", "t", "circo", "Type of the graph")
+	cmd.Flags().StringVarP(&since, "since", "s", "02/01/2006", "Since date")
 	err := cmd.Execute()
 	if err != nil {
 		fmt.Println(err)
